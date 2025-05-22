@@ -46,8 +46,8 @@ else:
             st.write(df.head())
 
             if 'timestamp' not in df.columns:
-            st.error("Error: 'timestamp' column not found in the API response. Possibly API limit reached or invalid data returned.")
-            st.stop()
+                st.error("Error: 'timestamp' column not found in the API response. Possibly API limit reached or invalid data returned.")
+                st.stop()
 
             df['timestamp'] = pd.to_datetime(df['timestamp'])
 
