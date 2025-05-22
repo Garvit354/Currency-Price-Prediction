@@ -40,7 +40,17 @@ else:
 
             # Load CSV data into DataFrame
             df = pd.read_csv(StringIO(r.text))
+
+            # Debug info in Streamlit to check what data is loaded
+            st.write("Raw data columns:", df.columns.tolist())  
+            st.write(df.head())
+
+            if 'timestamp' not in df.columns:
+            st.error("Error: 'timestamp' column not found in the API response. Possibly API limit reached or invalid data returned.")
+            st.stop()
+
             df['timestamp'] = pd.to_datetime(df['timestamp'])
+
             df = df.sort_values('timestamp')
 
             # Filter last 60 days before selected start date
