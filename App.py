@@ -4,30 +4,31 @@ import numpy as np
 import pandas as pd
 import requests
 from datetime import datetime, timedelta
-from tensorflow.keras.models import Sequential, load_model
-from tensorflow.keras.layers import LSTM, Dense
+from tensorflow.keras.models import Model, load_model
+from tensorflow.keras.layers import Input, LSTM, Dense, RepeatVector, TimeDistributed
 from sklearn.preprocessing import MinMaxScaler
 from io import StringIO
 import plotly.graph_objs as go
 import tensorflow as tf
 import random
 
-# Set seeds for reproducibility
+# Set random seed for reproducibility
 seed = 42
 np.random.seed(seed)
 random.seed(seed)
 tf.random.set_seed(seed)
 os.environ['PYTHONHASHSEED'] = str(seed)
 
-# Load API key securely
+# Load API key
 API_KEY = st.secrets.get("ALPHAVANTAGE_API_KEY")
 if not API_KEY:
-    st.error("API key missing. Check your secrets.toml.")
+    st.error("API key missing. Check secrets.toml.")
     st.stop()
 
 st.set_page_config(layout="wide")
-st.title("💱 Currency Price Prediction (Stable LSTM)")
+st.title("💱 Currency 10-Day Forecast (Seq2Seq LSTM)")
 
+# Currency options
 currency_options = ["USD", "INR", "EUR", "GBP", "JPY"]
 base = st.selectbox("Select Base Currency", currency_options)
 target = st.selectbox("Select Target Currency", currency_options, index=1 if base == currency_options[0] else 0)
@@ -42,84 +43,91 @@ else:
             r = requests.get(url)
 
             if r.status_code != 200 or "timestamp" not in r.text:
-                st.error("API error or invalid response.")
+                st.error("Error fetching data.")
                 st.stop()
 
             df = pd.read_csv(StringIO(r.text))
             if 'timestamp' not in df.columns:
-                st.error("Missing timestamp column. API limit may have been reached.")
+                st.error("Invalid API response.")
                 st.stop()
 
             df['timestamp'] = pd.to_datetime(df['timestamp'])
             df = df.sort_values('timestamp')
             start_dt = pd.to_datetime(start_date)
             df = df[df['timestamp'] < start_dt]
-            df = df.tail(300)  # use last 300 days
+            df = df.tail(300)
 
-            if df.empty or len(df) < 60:
-                st.error("Not enough data available.")
+            if len(df) < 70:
+                st.error("Not enough historical data.")
                 st.stop()
+
+            st.write(f"Using data from {df['timestamp'].iloc[0].date()} to {df['timestamp'].iloc[-1].date()}")
 
             prices = df['close'].values.reshape(-1, 1)
             scaler = MinMaxScaler()
             scaled = scaler.fit_transform(prices)
 
-            # Prepare training data
+            # Prepare input (60 days) → output (next 10 days)
             x, y = [], []
-            for i in range(60, len(scaled)):
+            for i in range(60, len(scaled) - 10):
                 x.append(scaled[i - 60:i])
-                y.append(scaled[i])
+                y.append(scaled[i:i + 10])
 
             x = np.array(x)
             y = np.array(y)
 
-        # Model training or loading
-        model_path = "currency_model.h5"
+        # Load or train model
+        model_path = "currency_seq2seq_model.h5"
         if os.path.exists(model_path):
             model = load_model(model_path)
-            st.success("✅ Loaded pre-trained model.")
+            st.success("✅ Loaded pre-trained 10-day model.")
         else:
-            st.info("🔁 Training model for the first time...")
-            model = Sequential([
-                LSTM(50, return_sequences=True, input_shape=(60, 1)),
-                LSTM(50),
-                Dense(1)
-            ])
-            model.compile(optimizer='adam', loss='mean_squared_error')
+            st.info("🔁 Training 10-day LSTM model...")
+            inputs = Input(shape=(60, 1))
+            encoded = LSTM(100, activation='relu')(inputs)
+            repeated = RepeatVector(10)(encoded)
+            decoded = LSTM(100, activation='relu', return_sequences=True)(repeated)
+            outputs = TimeDistributed(Dense(1))(decoded)
+
+            model = Model(inputs, outputs)
+            model.compile(optimizer='adam', loss='mse')
             model.fit(x, y, epochs=30, batch_size=32, verbose=0)
             model.save(model_path)
-            st.success("✅ Model trained and saved!")
+            st.success("✅ Model trained and saved.")
 
-        # Predict next day
-        last_60 = scaled[-60:]
-        input_seq = last_60.reshape(1, 60, 1)
-        pred_scaled = model.predict(input_seq, verbose=0)[0][0]
-        pred_scaled = np.clip(pred_scaled, 0, 1)
-        pred_actual = scaler.inverse_transform([[pred_scaled]])[0][0]
+        # Predict 10 days from last 60
+        last_60 = scaled[-60:].reshape(1, 60, 1)
+        predicted_scaled = model.predict(last_60)[0].reshape(10)
+        predicted_scaled = np.clip(predicted_scaled, 0, 1)
+        predicted_prices = scaler.inverse_transform(predicted_scaled.reshape(-1, 1)).flatten()
 
         # Show prediction
+        future_dates = [start_dt + timedelta(days=i) for i in range(1, 11)]
+        prediction_df = pd.DataFrame(predicted_prices, index=future_dates, columns=['Predicted'])
+
         st.markdown(
             f"""
             📈 **Next Day Prediction from {start_date}:**  
-            <span style="font-weight:bold; font-size:28px; color:green;">{pred_actual:.4f}</span>
+            <span style="font-weight:bold; font-size:28px; color:green;">{predicted_prices[0]:.4f}</span>
             """,
             unsafe_allow_html=True
         )
 
-        # Plot historical and prediction
-        future_date = start_dt + timedelta(days=1)
+        # Plot
         fig = go.Figure()
-        fig.add_trace(go.Scatter(x=df['timestamp'], y=df['close'], mode='lines', name='Historical Data', line=dict(color='blue')))
-        fig.add_trace(go.Scatter(x=[future_date], y=[pred_actual], mode='markers+text', name='Predicted', marker=dict(color='orange', size=10), text=["Predicted"], textposition="top center"))
-        fig.add_shape(type="line", x0=df['timestamp'].iloc[0], y0=prices[-1][0], x1=future_date, y1=prices[-1][0], line=dict(color="red", dash="dot"))
+        fig.add_trace(go.Scatter(x=df['timestamp'], y=df['close'], mode='lines', name='Historical', line=dict(color='blue')))
+        fig.add_trace(go.Scatter(x=future_dates, y=predicted_prices, mode='lines+markers', name='Predicted (10 days)', line=dict(color='orange', dash='dash')))
 
-        fig.update_layout(title=f"{base}/{target} - Next Day Forecast", xaxis_title="Date", yaxis_title="Exchange Rate", hovermode="x unified")
+        last_price = df['close'].iloc[-1]
+        fig.add_shape(type="line", x0=df['timestamp'].iloc[0], y0=last_price, x1=future_dates[-1], y1=last_price, line=dict(color="red", dash="dot"))
+
+        fig.update_layout(title=f"{base}/{target} Forecast (Next 10 Days)", xaxis_title="Date", yaxis_title="Exchange Rate", hovermode="x unified")
         st.plotly_chart(fig, use_container_width=True)
 
         st.markdown(
             f"🔴 **Last Known Price ({df['timestamp'].iloc[-1].date()}):** "
-            f"<span style='font-weight:bold; font-size:20px; color:red;'>{prices[-1][0]:.4f}</span>",
+            f"<span style='font-weight:bold; font-size:20px; color:red;'>{last_price:.4f}</span>",
             unsafe_allow_html=True
         )
 
-        st.write("📊 Debug — Predicted Value:", pred_actual)
+        st.dataframe(prediction_df.reset_index().rename(columns={"index": "Date"}))
