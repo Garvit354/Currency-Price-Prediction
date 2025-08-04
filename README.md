@@ -4,7 +4,7 @@ This project is a **Currency Price Prediction** that uses **LSTM (Long Short-Ter
 
 ---
 
-### 📽️ Demo of the Project
+### Demo of the Project
 
 ![Currency Prediction Demo](cpd.gif)
 
